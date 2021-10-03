@@ -1,0 +1,337 @@
+---
+title: "Statistical analysis of grocery store data"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo= FALSE, cache = TRUE)
+setwd(".")
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(dplyr)
+library(ggplot2)
+library(ggcorrplot)
+library(MASS)
+```
+
+```{r Importing data, eval=TRUE, include=FALSE}
+grocery_data <- read.csv("./grocery-store-data.csv", header = TRUE)
+
+#Making variables as factors 
+grocery_data$STORE_NUM <- factor(grocery_data$STORE_NUM)
+grocery_data$UPC <- factor(grocery_data$UPC)
+grocery_data$MANUFACTURER <- factor(grocery_data$MANUFACTURER)
+
+grocery_data$DISPLAY <- factor(grocery_data$DISPLAY)
+grocery_data$FEATURE<- factor(grocery_data$FEATURE)
+grocery_data$TPR_ONLY <- factor(grocery_data$TPR_ONLY)
+
+#Making WEEK_END_DATE variable more meaningful
+grocery_data$WEEK_END_DATE<-(grocery_data$WEEK_END_DATE - 39827)/7
+```
+
+```{r Summary, eval=TRUE, include=FALSE}
+str(grocery_data)
+summary(grocery_data)
+```
+## Explanatory Analysis
+To begin with, an explanatory data analysis was carried out, obtaining the following plots: 
+```{r EDA, eval=TRUE, warning = FALSE, message = FALSE, include=TRUE, fig.show="hold", out.width="50%"}
+library(gridExtra)
+library(grid)
+library(reshape2)
+library(DataExplorer)
+library(lattice)
+
+#Frequency distribution of all discrete variables
+plot_bar(grocery_data)
+
+#Box plot to explore promotional features on units sold
+boolean_df <- dplyr::select(grocery_data, c("DISPLAY", "TPR_ONLY", "FEATURE", "UNITS"))
+#boolean_df <- subset(grocery_data, select = c("DISPLAY", "TPR_ONLY", "FEATURE", "UNITS"))
+boolean_long <- melt(boolean_df, id.vars = "UNITS")
+ggplot(boolean_long, aes(x = variable, y = log(UNITS), colour = value)) + geom_boxplot() +
+  xlab("Factor") + ylab("log(UNITS)") + labs(color='Boolean value') + ggtitle("Exploring effect of promotional features on units sold") + theme(plot.title = element_text(hjust = 0.5))
+
+#Bivariate continuous distribution based on Units
+#plot_boxplot(grocery_data, by = "UNITS", title="Comparing numerical factors on units sold", geom_boxplot_args = list("outlier.color" = "red"))
+
+#Pairwise Scatter plot
+cols <- c("yellow", "red", "blue", "gray0", "magenta2",  "orange", "seagreen", "tan",  "wheat1", "orchid1" , "hotpink1", "cyan4")
+pairs(grocery_data[,c(1,2,3,10)], pch = 2, cex = 0.2,
+      col = cols[grocery_data$UPC])
+
+#Correlation plot
+grocery_data_numeric <- dplyr::select_if(grocery_data, is.numeric)
+r <- cor(grocery_data_numeric, use="all.obs") #all.obs produces an error for missing values
+ggcorrplot(round(r,2), hc.order = TRUE, type = "lower", lab = TRUE, title = "Correlation plot")
+```
+
+The data set contains 9996 entries for the 12 items in the frozen pizza category, with no missing data entries. 
+There are 4 manufacturers, with "Tombstone" and "Private Label" appearing the most in the data set. 
+It's also clear that most products do not have an aspect of promotion, whether being on display, in a leaflet or on a temporary price
+reduction. The data set also appears unbalanced, for example data related to UPC 2066200531 appears 300 times, while UPC's such as
+7192100337 appear roughly 900 times, a three times increase in the amount of data for the respective products.
+
+The effect of promotion is explored further via boxplots. It shows that all avenues of promotion increase the amount of log(UNITS) sold, with DISPLAY and FEATURE seeming to offer the largest increase in sales. 
+
+The correlation plot displays the correlation between the factors with numeric values. The most significant information from this plot, is that the BASE_PRICE and PRICE are highly correlated, with a Pearson correlation coefficient of 0.85. Therefore the regular price of the item is very similar to the actual amount charged for the product on the shelf. Also notable is the fact that PRICE and UNITS are negatively correlated, although to a lesser extent. This makes intuitive sense as people are generally less likely to buy more expensive products. 
+
+The pairwise scatter plot shows the relationship between the quantitative variables. There is no immediate pattern between explanatory variables and units when grouped by UPC. There is a clear association between price and base price, as verified by the correlation plot.
+
+
+## Model Selection
+A range of models were considered for predicting the units sold. For the linear model, a general linear model was decided on, as it is most commonly used to model count data, such as units sold in our case. As the BASE_PRICE and PRICE were highly correlated, BASE_PRICE was removed and another column titled "PERCENAGE_PRICE_CHANGE" was introduced to help account for the relationship between PRICE and BASE_PRICE. 
+
+The poisson regression model was chosen as a starting point, as it's the most common model used for count data. However there was clear evidence of overdispersion, as the the residual deviance should be approximately chi squared distributed with the stated degrees of freedom, which there was clear evidence against. Therefore the strict requirement that the variance must equal the mean is violated.
+
+```{r Adding percent change column, eval=TRUE, warning = FALSE, message = FALSE}
+#Adding a percent change
+grocery_data$PERCENTAGE_PRICE_CHANGE <- (grocery_data$BASE_PRICE-grocery_data$PRICE)*100/(grocery_data$BASE_PRICE)
+
+#Sum contrasts used, to compare every level to overall mean, as no evident 'Control' group
+contrasts(grocery_data$STORE_NUM) <-contr.sum(77)
+contrasts(grocery_data$UPC) <- contr.sum(12)
+```
+
+```{r Poisson, eval=TRUE, warning = FALSE, message = FALSE}
+glm_p <- glm(UNITS ~. -BASE_PRICE, data=grocery_data,
+            family = poisson(link='log'))
+
+cat("The null deviance:", summary(glm_p)$null.deviance, "on", glm_p$df.null, "degrees of freedom", "\n")
+cat("The residual deviance:", summary(glm_p)$deviance, "on", glm_p$df.residual, "degrees of freedom","\n\n")
+
+
+cat("The five-percent critical value for a chi-squared distribution with", glm_p$df.residual, "degrees of freedom is: \n", qchisq(0.95, df.residual(glm_p)),"\n However the deviance of the model is:", summary(glm_p)$deviance )
+
+
+p_value <- pchisq(glm_p$deviance, df=glm_p$df.residual, lower.tail=FALSE)
+#p_value - gave a result of 0. Clear evidence for overdispersion
+```
+
+
+```{r Quasipossion, eval=TRUE, warning = FALSE, message = FALSE}
+glm_qp <- glm(UNITS ~. -BASE_PRICE, data=grocery_data,
+            family = quasipoisson(link='log'))
+```
+
+The quasipossion model was trialed too, for it's ability to fit an extra dispersion parameter. This gave the same estimates, but with larger standard errors. However as this model lacks the use of log-likelihood, it was not possible to use likelihood based tools such as AIC, BIC, or deviance residuals. For this reason, a negative binomial model was decided on instead. 
+
+A negative binomial with a log link function was used, with the variable MANUFACTURER also removed, as UPC perfectly predicts MANUFACTURER, and the UPC variable contains more refined data compared to MANUFACTURER. One to three interactions were considered, the first interaction being PRICE:UPC. This is due to the fact that a particular products will affect the price, for example premium pizzas generally cost more. The interactions PERCENTAGE_PRICE_CHANGE:FEATURE and PERCENTAGE_PRICE_CHANGE:DISPLAY was also considered, as generally products displayed or advertised have an association with the price change, for example premium pizzas are often displayed when on discount to boost sales. It can be seen that there was not a large difference in AIC between the model with PRICE:UPC interaction compared to the model with both the PRICE:UPC and PERCENTAGE_PRICE_CHANGE:FEATURE. However the model with all three interactions had the largest AIC value. The residual deviance also increased slightly between the model with one and two interactions, with a larger increase in deviance with the model with all three interactions. Therefore the final model chosen was the one with only one interaction - UPC:PRICE. 
+
+```{r Negative binomial, eval=TRUE, warning = FALSE, message = FALSE}
+glm_nb <- glm.nb(UNITS ~., data=grocery_data)
+
+#Removing manufacturer and base price
+glm_nb1<- glm.nb(UNITS ~.-MANUFACTURER -BASE_PRICE, data=grocery_data)
+
+#Interactions
+glm_nb_interactions1 <- glm.nb(UNITS ~.-PRICE -UPC - MANUFACTURER -BASE_PRICE + PRICE*UPC, data=grocery_data)
+
+glm_nb_interactions2 <- glm.nb(UNITS ~. -MANUFACTURER -BASE_PRICE + PRICE:UPC + PERCENTAGE_PRICE_CHANGE:FEATURE, data=grocery_data)
+
+glm_nb_interactions3 <- glm.nb(UNITS ~. -MANUFACTURER -BASE_PRICE + PERCENTAGE_PRICE_CHANGE:UPC + PERCENTAGE_PRICE_CHANGE:FEATURE + PRICE:DISPLAY, data=grocery_data)
+
+cat("The null deviance of a model with one interation:", summary(glm_nb_interactions1)$null.deviance, "on", glm_nb_interactions1$df.null, "degrees of freedom", "\n")
+cat("The residual deviance of a model with one interation:", summary(glm_nb_interactions1)$deviance, "on", glm_nb_interactions1$df.residual, "degrees of freedom","\n")
+cat("The AIC of a model with one interation:", summary(glm_nb_interactions1)$aic,"\n\n")
+
+cat("The null deviance of a model with two interations:", summary(glm_nb_interactions2)$null.deviance, "on", glm_nb_interactions2$df.null, "degrees of freedom", "\n")
+cat("The residual deviance of a model with two interations:", summary(glm_nb_interactions2)$deviance, "on", glm_nb_interactions2$df.residual, "degrees of freedom","\n")
+cat("The AIC of a model with two interations:", summary(glm_nb_interactions2)$aic,"\n\n")
+
+cat("The null deviance of a model with three interations:", summary(glm_nb_interactions3)$null.deviance, "on", glm_nb_interactions3$df.null, "degrees of freedom", "\n")
+cat("The residual deviance of a model with three interations:", summary(glm_nb_interactions3)$deviance, "on", glm_nb_interactions3$df.residual, "degrees of freedom","\n")
+cat("The AIC of a model with three interations:", summary(glm_nb_interactions3)$aic,"\n\n")
+```
+
+```{r Diagnostic plots for the negative binomial, eval=TRUE, warning = FALSE, message = FALSE}
+par(mfrow=c(2,2))
+plot(glm_nb_interactions1)
+```
+
+Diagnostic plots were also looked at. The residuals appear to be randomly scattered around zero, indicating that they are independent. The majority of the points lie on the diagonal of the QQ plot, however outliers tend to curve upwards, but generally the deviance residuals behave approximately like standard normals. In the Scale Location plot, most of the points lie under 2 which is reasonable.
+
+```{r Visualising coefficients for the negative binomial, eval=TRUE, include=FALSE, warning = FALSE, message = FALSE}
+library(estimatr)
+tidy(glm_nb_interactions1)
+```
+The coefficients significant at the 0.1% level are plotted, and it can be seen that mostly store numbers are deemed the most significant when looking at the units sold. This could be as some stores are more strategically placed, or perhaps have better stock. The most significant coefficients range in value from around 0.5 to 2.5, implying a change in one unit of the predictor variable results in a log change of the units sold. There's also evidence of some of the interactions between PRICE and certain products being significant, along with whether or not they are on display. 
+
+```{r Plotting coefficients for the negative binomial, eval=TRUE, warning = FALSE, message = FALSE, out.height="40%"}
+glm_nb_interactions1 %>% 
+  tidy %>% 
+  dplyr::select(term, estimate, p.value) %>% 
+  dplyr::filter(p.value < 0.001, term!="(Intercept)") %>%
+    ggplot(aes(y = term, x = exp(estimate))) + 
+    geom_vline(xintercept = 0, linetype = 2) + 
+    scale_y_discrete(guide = guide_axis(check.overlap = TRUE)) +
+    ggtitle("Coefficient values for factors with p value <0.001") +
+    xlab("Estimate of coefficient") + ylab("Variable") + 
+    geom_point()
+```
+
+For the advanced regression methods, random forests was trialed first, as decision trees often are inaccurate and perform badly on test data. random forests allow us to measure accuracy of the model by the proportion of out of bag samples that are correctly classified by the random forest, effectively reducing variance. Gradient boosting was also trialed, for its ability to combine weak learners sequentially and correct previous errors to reduce bias. 
+
+```{r Advanced linear regression - Random Forest, eval=TRUE, include=FALSE, warning = FALSE, message = FALSE}
+#Random Forest
+library(fastDummies)
+library(randomForest)
+n <- nrow(grocery_data)
+set.seed(1)
+train_size <- round(2 / 3 * n)
+train_points <- sample(1:n, train_size)
+train_set <- grocery_data[train_points, ] 
+test_set <- grocery_data[-train_points, ]
+
+#Creating dummy variables
+dummy_cols(grocery_data)
+#Selecting columns
+dummy_cols(grocery_data, select_columns = c("STORE_NUM", "UPC", "MANUFACTURER", "DISPLAY", "FEATURE", "TPR_ONLY"))
+#Remove first dummy for each pair of dummy columns made
+fast_dummies <- dummy_cols(grocery_data, select_columns = c("STORE_NUM", "UPC", "MANUFACTURER", "DISPLAY", "FEATURE", "TPR_ONLY"),
+    remove_first_dummy = TRUE,
+    remove_selected_columns = TRUE)
+
+names(fast_dummies) <- make.names(names(fast_dummies)) #Converting variable names to be legal
+
+grocery_data_rf <- randomForest(UNITS ~ ., data = fast_dummies, subset = train_points)
+print(grocery_data_rf)
+
+grocery_data_rf_pred <- predict(grocery_data_rf, newdata = fast_dummies[-train_points,])
+```
+
+
+```{r Mean absolute error for random forest, eval=TRUE, warning = FALSE, message = FALSE}
+cat("Mean absolute error of the Random Forest model:", mean(abs(grocery_data_rf_pred - fast_dummies$UNITS[-train_points])), "\n")
+```
+
+```{r Advanced linear regression - Gradient boosting, eval=TRUE, include=FALSE, warning = FALSE, message = FALSE}
+max_depth_options <- c(5, 7, 10)
+folds <- NULL
+best_error <- Inf
+best_md <- 0
+best_nrounds <- 0
+
+library(xgboost)
+for (md in max_depth_options) {
+  cat("Trying maximum depth of", md, "...\n")
+  grocery_data_xgb_cv <- xgb.cv(data = as.matrix(fast_dummies[, 1:96]), label = fast_dummies[, 97],
+                          nfold = 5, nrounds = 350, max_depth = md, 
+                          folds = folds, verbose = FALSE)
+  if (is.null(folds)) {
+    folds <- grocery_data_xgb_cv$folds
+  }
+  trial_error <- min(grocery_data_xgb_cv$evaluation_log$test_rmse_mean)
+  if (trial_error < best_error) {
+    best_error <- trial_error
+    best_md <- md
+    best_nrounds <- which.min(grocery_data_xgb_cv$evaluation_log$test_rmse_mean)
+  }
+}
+cat("Hyperparameter selection: best nrounds is", best_nrounds, 
+    "and best maximum depth is", best_md, "\n")
+
+grocery_data_xgb_opt <- xgboost(data = as.matrix(fast_dummies[train_points, -4]), 
+                          label = fast_dummies$UNITS[train_points], 
+                          nrounds = best_nrounds, max_depth = best_md, verbose = FALSE)
+grocery_data_xgb_opt_pred <- predict(grocery_data_xgb_opt, as.matrix(fast_dummies[-train_points, -4]))
+```
+
+```{r Mean absolute error for gradient boosting, eval=TRUE, warning = FALSE, message = FALSE}
+cat("Mean absolute error for optimised XGB:",
+    mean(abs(grocery_data_xgb_opt_pred - fast_dummies$UNITS[-train_points])), "\n")
+```
+
+The random forests model gave a mean absolute error of 4.664401, while the gradient boosting method gave a mean absolute error of 4.620682, a slight decrease. For the random forest model, the percentage variance explained was 68.8%, which is relatively high. This indicates the out of bag predictions explained the target variance of the training set by 68.8%. However, random forests tend to be biased towards variables with more levels, such as the STORE_NUM variable. The random forest model also contained 500 trees, which could potentially lead to overfitting. In addition, it can be argued that boosting reduces error on both fronts, by adding each new tree in sequence it reduces bias by capturing what was missed in the preceding tree. It also reduces variance by combining many models, whereas random forests tend to only reduce variance. For these reasons, the final model chosen was the gradient boosting method. 
+
+
+```{r Interpretability, eval=TRUE, out.height="40%"}
+grocery_importance <- xgb.importance(feature_names = names(fast_dummies[,-4]), model = grocery_data_xgb_opt)
+xgb.plot.importance(grocery_importance, top_n = 15)
+title(main = "Variable importance as determined by gradient boosting", xlab = "Information Gain", ylab = "Variable")
+```
+
+The graph shows the most important variables, as deemed by gradient boosting. It's clear that DISPLAY is by far the most important in terms of information gain. This implies that the DISPLAY attribute most useful for discriminating between the classes to be learned. As information gain is always maximized, the DISPLAY attribute will be tested/split first. This suggests that knowing the DISPLAY status reduces the uncertainty about units sold the most. 
+
+## Choosing the single "best" model
+```{r 10 Cross fold validation - Negative Binomial GLM, eval=TRUE, warning = FALSE, message = FALSE, include = FALSE}
+
+library(MASS)
+library(caret)
+
+k_folds = 10
+set.seed(1)
+folds <- createFolds(grocery_data$UNITS, k = k_folds)
+
+test_rmse_glm_nb= c()
+
+for (k in 1:k_folds){
+  cat("Fold = ", k)
+  test_set = grocery_data[folds[[k]],]
+  train_set=grocery_data[-folds[[k]],]
+  
+  glm_nb_model<-glm.nb(UNITS ~.-PRICE -UPC - MANUFACTURER -BASE_PRICE + PRICE*UPC, data=train_set)
+  glm_nb_pred = predict(glm_nb_model, newdata = test_set)
+  
+  test_rmse_glm_nb[k]=sqrt(mean((exp(glm_nb_pred)-test_set$UNITS)^2))
+  cat(" Test RMSE:", test_rmse_glm_nb[k],"\n")
+}
+```
+
+```{r 10 Cross fold validation - Gradient boosting, eval=TRUE, warning = FALSE, message = FALSE, include=FALSE}
+set.seed(1)
+folds1 <- createFolds(grocery_data$UNITS, k = k_folds)
+
+grocery_matrix <- model.matrix(UNITS~., data = grocery_data)
+
+test_rmse_xgb=c()
+
+for (k in 1:k_folds){
+  cat("Fold = ", k)
+  test_set = grocery_matrix[folds1[[k]],]
+  train_set= grocery_matrix[-folds1[[k]],]
+  y_train=grocery_data$UNITS[-folds1[[k]]]
+  y_test=grocery_data$UNITS[folds1[[k]]]
+  
+  xgb_opt_model <- xgboost(data = train_set, label = y_train, nrounds = 308, max_depth = 7, verbose = FALSE)
+  
+  
+  xgb_prediction=predict(xgb_opt_model, newdata=test_set)
+  test_rmse_xgb[k]=sqrt(mean((xgb_prediction-y_test)^2))
+  cat(" Test RMSE:", test_rmse_xgb[k],"\n")
+}
+```
+
+```{r t test, eval=TRUE, include=FALSE}
+t.test(test_rmse_glm_nb, test_rmse_xgb, paired=TRUE, alternative = "greater")
+
+t.test(test_rmse_glm_nb, test_rmse_xgb)
+```
+Both the negative binomial and the gradient boosted methods have strengths and weaknesses. In order to fit a negative binomial successfully, the data must fit the model assumptions. In the QQ plot, there seems to be a quadratic relationship indicating perhaps a violation on the assumption of normality. In addition sample sizes are often far must be large enough to obtain reliable estimates of the overdispersion parameter. Most significantly, there is no systematic way to discover all the relevant interactions, there are certainly more than the three picked out earlier. The gradient boosting method is less stringent on the assumptions required and is able to model complex relationships. However to get a good prediction, the parameters must be tuned carefully. 
+
+When carrying out the t test on the 10-fold cross validation with the alternative hypothesis that that mean of test RMSE of the negative binomial is greater than the mean of the test RMSE for the gradient boosted method, a p value less than 0.05 was obtained at the 5% significance level. This implies that the difference in means is not equal to zero, and that the mean RMSE of the negative binomial is less than or equal to the mean RMSE of the gradient boosting method. Therefore it is concluded that the gradient boosted model performs better in terms of predictive power. 
+
+## Final model
+
+```{r Prediction, eval=TRUE, include=FALSE}
+#Filtering for specific criteria
+to_predict = dplyr::filter(grocery_data, UPC==7192100337 & WEEK_END_DATE == (39995-39827)/7 & STORE_NUM == 8263)
+to_predict
+
+#Decreasing price by 10%
+to_predict$PRICE=to_predict$PRICE*0.9
+to_predict$PERCENTAGE_PRICE_CHANGE=-10
+to_predict 
+
+#Running prediction
+to_predict_matrix=model.matrix(UNITS~.,to_predict)
+grocery_data_matrix <- model.matrix(UNITS~.,grocery_data)
+
+xgb_prediction_model <- xgboost(data = grocery_data_matrix, label = grocery_data$UNITS, nrounds = 308, max_depth = 7, verbose = FALSE)
+
+predict(xgb_prediction_model, newdata=to_predict_matrix)
+```
+
+The final model chosen is therefore the gradient boosted model. To generate prediction on the units sold, DISPLAY, PERCENTAGE_PRICE_CHANGE and PRICE offer the most information gain and are the most important predictive features. The effect of decreasing PRICE by 10% on the specified UPC will (surprisingly!) decrease the units sold by 2, going from 13 to 11, keeping all other covariates constant.  
